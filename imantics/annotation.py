@@ -801,6 +801,27 @@ class Mask:
 
     def __init__(self, array):
         self.array = np.array(array, dtype=bool)
+        
+    def to_rle(self) -> dict:
+        """mask to rle
+        Returns:
+            dict: rle object
+        """
+        binary_mask = self.array
+        rle = {"counts": [], "size": list(binary_mask.shape)}
+
+        flattened_mask = binary_mask.ravel(order="F")
+        diff_arr = np.diff(flattened_mask)
+        nonzero_indices = np.where(diff_arr != 0)[0] + 1
+        lengths = np.diff(np.concatenate(([0], nonzero_indices, [len(flattened_mask)])))
+
+        # the odd counts are always the numbers of zeros
+        if flattened_mask[0] == 1:
+            lengths = np.concatenate(([0], lengths))
+
+        rle["counts"] = lengths.tolist()
+
+        return rle
 
     def bbox(self):
         """
