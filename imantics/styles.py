@@ -14,3 +14,6 @@ VOC = "voc"
 
 #: YOLO Style value (https://github.com/AlexeyAB/darknet#how-to-train-to-detect-your-custom-objects)
 YOLO = "yolo"
+
+# 
+PGL = "pgl"

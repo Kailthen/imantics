@@ -3,10 +3,15 @@ from lxml.builder import E
 import numpy as np
 import json
 import cv2
+import random
+from PIL import ImageDraw
+from PIL import Image
+import pydash
 
 from .color import Color
 from .styles import COCO
 from .basic import Semantic
+from .category import Category
 
 
 class Annotation(Semantic):
@@ -85,7 +90,7 @@ class Annotation(Semantic):
         return cls(image=image, category=category, polygons=polygons)
 
     def __init__(self, image=None, category=None, bbox=None, mask=None, polygons=None, id=0,\
-                 color=None, metadata={}, width=0, height=0):
+                 color=None, metadata={}, score=1.0, width=0, height=0):
 
         assert isinstance(id, int), "id must be an integer"
         assert bbox is not None or mask is not None or polygons is not None, "you must provide a mask, bbox or polygon"
@@ -93,6 +98,7 @@ class Annotation(Semantic):
         self.image = image
         self.width = width
         self.height = height
+        self.score = score
 
 
         if image is not None:
@@ -271,7 +277,7 @@ class Annotation(Semantic):
             'height': self.height,
             'area': int(self.area),
             'segmentation': self.polygons.segmentation,
-            'bbox': self.bbox.bbox(style=BBox.WIDTH_HEIGHT),
+            'bbox': self.bbox.bbox(style=BBox.XYWH),
             'metadata': self.metadata,
             'color': self.color.hex,
             'iscrowd': 0,
@@ -358,11 +364,122 @@ class Annotation(Semantic):
         )
 
         return element
+    
+    @classmethod
+    def from_pgl(cls, pgl_obj:dict, image:Image.Image = None):
+        image_field = pydash.get(pgl_obj, 'object_data.image', None)
+        bbox_field = pydash.get(pgl_obj, 'object_data.bbox', None)
+        if image_field is not None:
+            # TODO 
+            return cls(image=image, category=None, mask=None)
+        elif bbox_field is not None:
+            box_arr = pydash.get(pgl_obj, 'object_data.bbox[0].val', None)
+            category = None
+            cate = pydash.get(pgl_obj, 'type', None)
+            if cate is not None:
+                category = Category(name=cate)
+            
+            scor = 1.0
+            num_attrs = pydash.get(pgl_obj, 'object_data.bbox[0].attributes.num', None)
+            if num_attrs is not None:
+                for attr in num_attrs:
+                    if attr['name'] == 'score':
+                        scor = attr['val']
+                        break
+            return cls(image=image, category=category, bbox=BBox.create(box_arr, style=BBox.CXCYWH), score=scor)
+    
+    def pgl(self, rle=False):
+        """
+        to openlabel format
+
+        Args:
+            rle (bool, optional): Convert Binary Mask to RLE format, save to object_data.image. Defaults to False.
+        """
+        def _box(bbox, score):
+            return [
+                        {
+                            "val": bbox,
+                            "attributes": {
+                                "num": [
+                                    {
+                                        "name": "score",
+                                        "val": score
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+        def _polys(mask, score):
+                return [{
+                "closed": True,
+                "mode": "MODE_POLY2D_ABSOLUTE",
+                "val": poly.flatten(),
+                "attributes": {
+                    "num": [
+                        {
+                            "name": "score",
+                            "val": score
+                        }
+                    ],
+                }
+            } for poly in mask.polygons().points]
+        def _rle(mask, score):
+            return {
+                "val": ",".join([str(round(c, 3)) for c in mask.to_rle()['counts']]),
+                "mime_type": "image/png",
+                "encoding": "rle",
+                "attributes": {
+                    "num": [
+                        {
+                            "name": "score",
+                            "val": score
+                        }
+                    ],
+                }
+            }
+        category_name = self.category.name if self.category else None
+        bbox = list(self.bbox.bbox(style=BBox.CXCYWH))
+        if self._init_with_bbox:
+            entity = {
+                "type": category_name,
+                "object_data": {
+                    "bbox": _box(bbox, self.score)
+                }
+            }
+        elif self._init_with_mask:
+            entity = {
+                "type": category_name,
+                "object_data": {
+                    "bbox": _box(bbox, self.score),
+                    'poly2d': _polys(self.mask, self.score),
+                    'image': _rle(self.mask, self.score) if rle else None
+                }
+            }
+        elif self._init_with_polygons:
+           pass
+        return entity
 
     def save(self, file_path, style=COCO):
         with open(file_path, 'w') as fp:
             json.dump(self.export(style=style), fp)
+            
+    def draw(self, image:Image.Image):
+        empty_image = Image.new('RGBA', image.size, color=(0, 0, 0, 0))
+        image_draw = ImageDraw.Draw(empty_image)
+        if self._init_with_bbox:
+            color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255), 153)
 
+            text = f"{self.score:.3f}"
+            if self.category is not None:
+                color = (*(self.category.color.rgb), 153)
+                text = f"{self.category.name} {text}"
+            xyxy = self.bbox.bbox(style=BBox.XYXY)
+            image_draw.rectangle(((xyxy[0], xyxy[1]), (xyxy[2], xyxy[3])), outline=color,  width=2)
+            color = (30, 144, 255, 153)
+            image_draw.text((xyxy[0], xyxy[1]), text, fill=color)
+        n_image = image.convert('RGBA')
+        n_image.alpha_composite(empty_image)
+        return n_image
 
 class BBox:
     """
@@ -373,10 +490,13 @@ class BBox:
     INSTANCE_TYPES = (np.ndarray, list, tuple)
 
     #: Bounding box format style [x1, y1, x2, y2]
-    MIN_MAX = 'minmax'
+    XYXY = 'xyxy'
 
     #: Bounding box format style [x1, y1, width, height]
-    WIDTH_HEIGHT = 'widthheight'
+    XYWH = 'xywh'
+    
+    #: Bounding box format style [center_x, center_y, width, height]
+    CXCYWH = 'cxcywh'
 
     @classmethod
     def from_mask(cls, mask):
@@ -429,37 +549,58 @@ class BBox:
 
         assert len(bbox) == 4
 
-        self.style = style if style else BBox.MIN_MAX
+        self.style = style if style else BBox.XYXY
 
         self._xmin = int(bbox[0])
         self._ymin = int(bbox[1])
 
-        if self.style == self.MIN_MAX:
+        if self.style == self.XYXY:
             self._xmax = int(bbox[2])
             self._ymax = int(bbox[3])
             self.width = self._xmax - self._xmin
             self.height = self._ymax - self._ymin
 
-        if self.style == self.WIDTH_HEIGHT:
+        if self.style == self.XYWH:
             self.width = int(bbox[2])
             self.height = int(bbox[3])
+            self._xmax = self._xmin + self.width
+            self._ymax = self._ymin + self.height
+            
+        if self.style == self.CXCYWH:
+            cx = bbox[0]
+            cy = bbox[1]
+            self.width = int(bbox[2])
+            self.height = int(bbox[3])
+            
+            self._xmin = cx - self.width / 2
+            self._ymin = cy - self.height / 2
             self._xmax = self._xmin + self.width
             self._ymax = self._ymin + self.height
 
     def area(self):
         return self.width * self.height
 
-    def bbox(self, style=None):
+    def bbox(self, style='xyxy'):
         """
         Generates tuple repersentation of bounding box
 
-        :param style: stlye to generate bounding box (defaults: MIN_MAX)
+        :param style: stlye to generate bounding box (defaults: XYXY)
         :returns: tuple of bounding box with specified style
         """
-        style = style if style else self.style
-        if style == self.MIN_MAX:
+        # style = style if style else self.style
+        if style is None:
+            style = self.XYXY
+    
+        if style == self.XYXY:
             return self._xmin, self._ymin, self._xmax, self._ymax
-        return self._xmin, self._ymin, self.width, self.height
+        elif style == self.XYWH:
+            return self._xmin, self._ymin, self.width, self.height
+        elif style == self.CXCYWH:
+            cx = self._xmin + self.width / 2
+            cy = self._ymin + self.height / 2
+            return cx, cy, self.width, self.height
+        else:
+            raise ValueError('Style {} is not supported'.format(style))
 
     def polygons(self):
         """
@@ -489,22 +630,6 @@ class BBox:
             self._c_mask = Mask(mask)
 
         return self._c_mask
-
-    def draw(self, image, color=None, thickness=2):
-        """
-        Draws a bounding box to the image array of shape (width, height, 3)
-
-        *This function modifies the image array*
-
-        :param color: RGB color repersentation
-        :type color: tuple, list
-        :param thickness: pixel thickness of box
-        :type thinkness: int
-        """
-        color = Color.create(color).rgb
-        image_copy = image.copy()
-        cv2.rectangle(image_copy, self.min_point, self.max_point, color, thickness)
-        return image_copy
 
     @property
     def min_point(self):
@@ -597,7 +722,7 @@ class BBox:
             other = BBox(other)
 
         if isinstance(other, BBox):
-            return np.array_equal(self.bbox(style=self.MIN_MAX), other.bbox(style=self.MIN_MAX))
+            return np.array_equal(self.bbox(style=self.XYXY), other.bbox(style=self.XYXY))
 
         return False
 

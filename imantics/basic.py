@@ -40,6 +40,15 @@ class Semantic(object):
         """
         return []
     
+    def pgl(self):
+        """
+        Export object in PGL format
+
+        :returns: object in format
+        :rtype: list, tuple
+        """
+        return []
+    
     def paperjs(self):
         """
         Export object in PaperJS format
@@ -58,6 +67,7 @@ class Semantic(object):
             VGG: self.vgg(),
             YOLO: self.yolo(),
             VOC: self.voc(),
+            PGL: self.pgl(),
             PAPERJS: self.paperjs()
         }.get(style)
     
